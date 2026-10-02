@@ -1,0 +1,13 @@
+# MLS data files (raw monthly + combined outputs) are too large for GitHub's 100 MB file limit
+*.csv
+csv/
+output/
+
+# Downloader working folders: in-progress downloads and backups of replaced raw files
+downloads_tmp/
+backup/
+
+# Local credentials - never commit
+.env
+
+__pycache__/
