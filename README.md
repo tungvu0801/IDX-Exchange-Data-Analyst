@@ -42,14 +42,22 @@ downloads_tmp/  in-progress downloads and the download log
 
 ### 1. Collect the monthly files
 
-Each month comes from the Trestle API as two files:
+The monthly files in `csv/` come from two sources, both provided by IDX:
+
+- **FileZilla exports from IDX** – the original monthly files.
+- **Direct API downloads** by `download_missing_months.py`, used to fill gaps.
+
+Each month is two files:
 
 - **Listings:** listings whose contract started that month (`ListingContractDate`).
 - **Sold:** sales that closed that month (`CloseDate`, `MlsStatus = 'Closed'`).
 
-When this project started, 17 listing months and 17 sold months were missing,
-and January 2026 listings was an incomplete download. `download_missing_months.py`
-filled the gaps. For each month it:
+`download_missing_months.py` uses the same endpoint, fields, date filters,
+monthly boundaries, page size and stop condition as the current IDX fetch
+scripts (`crmls_listed.py`, `crmls_sold.py`). Whether the historical FileZilla
+exports were produced with identical queries is not confirmed. The downloader
+fetches any month that is missing from `csv/` or structurally damaged. For each
+month it:
 
 1. Downloads all pages of results into a temporary file, saved as UTF-8.
 2. Checks the file:
@@ -62,6 +70,18 @@ filled the gaps. For each month it:
 
 Timeouts and rate limits are retried a limited number of times. If
 authentication fails, the run stops with a message that doesn't show the key.
+
+**One FileZilla file was replaced.** The local copy of `CRMLSListing202601.csv`
+had 2,606 rows, a final row with 78 of 82 fields and no trailing newline, so it
+was treated as truncated and replaced by an API download (25,931 rows). The
+original local copy is kept in `backup/`. This describes the file as observed
+locally; it has not been checked whether the copy on the IDX FileZilla server
+has the same problem.
+
+**Where both `CRMLSSold{YYYYMM}.csv` and `CRMLSSold{YYYYMM}_filled.csv` exist,
+the script uses the `_filled` file.** This is the script's current behaviour,
+not a confirmed IDX requirement. What `_filled` means (it adds `latfilled` and
+`lonfilled` columns) has not been confirmed with IDX.
 
 ### 2. Combine and filter (`week1_aggregate.py`)
 
@@ -112,14 +132,14 @@ python week1_aggregate.py                             # build the Week 1 dataset
 
 ## Week 1 results
 
-Run on 2026-10-02, covering 2024-01 through 2026-09:
+Run on 2026-10-03, covering 2024-01 through 2026-09:
 
 | | Listings | Sold |
 |---|---:|---:|
 | Monthly files found | 33 of 33 | 33 of 33 |
-| Rows before concat (sum of monthly files) | 925,452 | 742,127 |
-| Rows after concat | 925,452 | 742,127 |
-| Rows after Residential filter | **596,911** | **497,570** |
+| Rows before concat (sum of monthly files) | 1,046,606 | 736,168 |
+| Rows after concat | 1,046,606 | 736,168 |
+| Rows after Residential filter | **665,579** | **495,070** |
 
 Outputs:
 - `output/combined_listings_residential.csv`
@@ -137,32 +157,51 @@ columns.
 Having a file for every month does **not** prove the source data is complete or
 consistent.
 
-- **Files come from different points in time.** 35 files were downloaded on
-  2026-10-02, and each matched the API's own count at that moment. The other 31
-  were saved earlier, at different and unknown dates, so they can't be checked
-  the same way.
-  - Older listing files have 1,500 to 13,544 more rows than the API returns today.
-  - Older sold files from August 2024 onward are missing roughly 600 to 1,200
-    closings per month that were reported later.
-  - Month-to-month trends may jump where an older file sits next to a newer one.
-- **January 2024 listings: unresolved discrepancy.** The local file has 27,454
-  rows; the API returns 23,403 today.
-  - Most of the records found only in the local file were `Active` when it was
-    saved. None of 400 sampled still exist in the API under any date.
-  - Likely cause: listings that later expired or were withdrawn are no longer
-    served by the feed. This is not proven.
-  - The file also has exactly 20,000 `Closed` rows, which may point to a limit
-    in the tool that produced it.
-  - The file was left unchanged.
-- **Same listing in two months.** 93 listings and 287 sold rows share a
-  `ListingKey` with a row in another month, because a date changed between
-  downloads. They were not removed; this is left for data cleaning.
-- **Recent months are still changing.** Late-reported closings will keep
-  adding to the latest sold months.
-- **Some columns don't cover every month:**
-  - `ListAgentEmail` is blank for listings downloaded with the current script.
-  - `BuyerAgencyCompensation` exists only in early-2024 files.
-  - `latfilled` and `lonfilled` exist only in the `_filled` sold files.
+### Mixed sources
 
-**Possible next step:** download all 33 months again in one session, so every
-month comes from the same point in time. Keep the current files in `backup/`.
+`csv/` holds **69 monthly files** (33 listing, 36 sold). The script selects
+**66** (33 + 33). Origin was judged from the download manifest and each file's
+header layout, not from row counts or modification dates.
+
+| Origin | Physical | Selected | Which |
+|---|---:|---:|---|
+| API download (`download_missing_months.py`, recorded in `csv/download_manifest.csv`) | 14 | 11 | Listings 2026-01, 2026-05 to 2026-09; Sold 2026-05 to 2026-09. Sold 2024-04/06/07 plain files are present but not selected. |
+| Consistent with the IDX FileZilla exports (header layout differs from the downloader's; no manifest record) | 52 | 52 | All other listing files; all `_filled` and 78-column sold files. |
+| Unknown (header identical to the current `crmls_sold.py`, no manifest record) | 3 | 3 | Sold 2026-02, 2026-03, 2026-04. |
+
+Consequences:
+
+- **The files are snapshots from different dates.** FileZilla export dates are
+  unknown; API downloads were taken on 2026-10-02 and 2026-10-03. Compared with
+  the API on 2026-10-03, FileZilla listing files hold 1,153 to 13,575 *more*
+  rows per month, and most FileZilla sold files hold up to 1,296 *fewer*. API
+  downloads taken one day apart also differed by tens to hundreds of rows.
+  **A count difference between sources is expected and does not by itself show
+  that a file is incomplete or incorrect.** The causes have not been confirmed
+  with IDX; possibilities include snapshot timing, listings leaving the feed
+  after expiring or being withdrawn (no file from either source contains
+  Expired, Withdrawn or Canceled statuses), late-reported closings, and
+  differences in how the FileZilla exports were produced.
+- **Month-to-month trends may step** where a FileZilla month sits next to an
+  API month (for example listings 2026-04 to 2026-05) for reasons unrelated to
+  the market.
+- **Column coverage varies by source:** `ListAgentEmail` and
+  `BuyerAgencyCompensation` appear only in some FileZilla listing files;
+  `latfilled`/`lonfilled` only in `_filled` sold files; `OriginatingSystemName`
+  only in files with the current sold header.
+
+### Open questions
+
+- **January 2024 listings.** The file has 27,454 rows; the API returned about
+  23,400 on 2026-10-03. Its `Closed` count is exactly 20,000, the only
+  round-thousand status count in any monthly file. One hypothesis is a cap in
+  that export; this is unconfirmed. The file is used unchanged.
+- **Same listing in two months.** 203 listing rows and 379 sold rows share a
+  `ListingKey` with a row in another month. A plausible cause is a date that
+  changed between snapshots. They were not removed; this is left for cleaning.
+- **Recent months will change** as late closings and status updates arrive.
+
+Points to confirm with IDX: whether the feed drops expired or withdrawn
+listings; whether the January 2024 export was capped; what `_filled` means and
+which version to prefer; whether the FileZilla set or a single-date API snapshot
+should be treated as canonical for trend analysis.

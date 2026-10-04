@@ -246,21 +246,21 @@ def main():
     report(f"Required coverage: {START:%Y-%m} through {END:%Y-%m} ({len(months_in_range(START, END))} months)")
 
     # ---- Listings -----------------------------------------------------------
-    # Run on 2026-10-02 (required range 2024-01 .. 2026-09), 33 of 33 months found:
-    #   Rows before concat (sum of monthly files): 925,452
-    #   Rows after concat:                         925,452
-    #   Rows before Residential filter:            925,452
-    #   Rows after Residential filter:             596,911
-    #   Saved as combined_listings_residential.csv (596,911 rows)
+    # Run on 2026-10-03 (required range 2024-01 .. 2026-09), 33 of 33 months found:
+    #   Rows before concat (sum of monthly files): 1,046,606
+    #   Rows after concat:                         1,046,606
+    #   Rows before Residential filter:            1,046,606
+    #   Rows after Residential filter:             665,579
+    #   Saved as combined_listings_residential.csv (665,579 rows)
     process("listings", "CRMLSListing")
 
     # ---- Sold ---------------------------------------------------------------
-    # Run on 2026-10-02 (required range 2024-01 .. 2026-09), 33 of 33 months found:
-    #   Rows before concat (sum of monthly files): 742,127
-    #   Rows after concat:                         742,127
-    #   Rows before Residential filter:            742,127
-    #   Rows after Residential filter:             497,570
-    #   Saved as combined_sold_residential.csv (497,570 rows)
+    # Run on 2026-10-03 (required range 2024-01 .. 2026-09), 33 of 33 months found:
+    #   Rows before concat (sum of monthly files): 736,168
+    #   Rows after concat:                         736,168
+    #   Rows before Residential filter:            736,168
+    #   Rows after Residential filter:             495,070
+    #   Saved as combined_sold_residential.csv (495,070 rows)
     process("sold", "CRMLSSold")
 
     report_path = OUTPUT_DIR / "run_report.txt"
