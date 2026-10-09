@@ -19,6 +19,7 @@ saved as new CSVs, ready for analysis over time.
 | File | What it does |
 |---|---|
 | `week1_aggregate.py` | **Week 1 deliverable.** Combines the monthly files, filters to Residential, saves the outputs, and records row counts. |
+| `week2_3_eda.py` | **Weeks 2–3 deliverable.** Inspects and validates the sold data: property types, Residential filter, missing values, numeric distributions with charts, EDA questions. Saves the filtered dataset. |
 | `download_missing_months.py` | Downloads any month that is missing or damaged, checks it, and saves it to `csv/`. |
 | `crmls_listed.py` | Original single-month script for listings (filtered by `ListingContractDate`). |
 | `crmls_sold.py` | Original single-month script for closed sales (filtered by `CloseDate` and `MlsStatus = 'Closed'`). |
@@ -30,7 +31,7 @@ following local folders:
 
 ```
 csv/            raw monthly files (CRMLSListingYYYYMM.csv, CRMLSSoldYYYYMM.csv)
-output/         combined datasets and run_report.txt
+output/         combined datasets and run_report.txt (Week 1); week2_3/ (Weeks 2–3)
 backup/         copies of raw files that were replaced
 downloads_tmp/  in-progress downloads and the download log
 .env            API key (local only)
@@ -104,10 +105,10 @@ not a confirmed IDX requirement. What `_filled` means (it adds `latfilled` and
 
 ## How to run
 
-**Requirements:** Python 3.12, `pandas`, `requests`
+**Requirements:** Python 3.12, `pandas`, `requests`, `matplotlib`
 
 ```bash
-pip install pandas requests
+pip install pandas requests matplotlib
 ```
 
 **Credentials (only needed for downloading):** create a file named `.env` in the
@@ -126,6 +127,7 @@ python download_missing_months.py --plan              # list missing/damaged mon
 python download_missing_months.py                     # download them
 python download_missing_months.py --compare-existing  # compare local row counts with the API today
 python week1_aggregate.py                             # build the Week 1 datasets
+python week2_3_eda.py                                 # Weeks 2-3 validation and EDA (sold)
 ```
 
 ---
@@ -205,3 +207,120 @@ Points to confirm with IDX: whether the feed drops expired or withdrawn
 listings; whether the January 2024 export was capped; what `_filled` means and
 which version to prefer; whether the FileZilla set or a single-date API snapshot
 should be treated as canonical for trend analysis.
+
+---
+
+## Weeks 2–3 – Dataset Structuring and Validation
+
+**Goal:** inspect the sold dataset before analysis, keep only Residential
+records, and run the first exploratory checks that later weeks build on.
+
+**Deliverable:** [`week2_3_eda.py`](week2_3_eda.py). It reads the same 33
+monthly sold files as Week 1, using Week 1's file-selection code.
+
+### What the script does
+
+1. **Dataset understanding:** rows, columns and data types. Each column is
+   labelled as a market analysis field (price, timing, property, location) or
+   a metadata field (identifiers, agents and offices, system).
+2. **Property types and filter:** lists every `PropertyType` value with its
+   count and share before filtering, then keeps `PropertyType == 'Residential'`
+   (exact, case-sensitive). It also checks for case or spacing variants and
+   blanks.
+3. **Missing values:** null count and percentage for every column, a flag for
+   columns with strictly more than 90% missing, and a keep/drop decision with
+   its reason. Core analysis fields are always kept. It also counts values that
+   may stand in for missing data (zeros, "Other", Y/N fields that only ever
+   record True) without changing them.
+4. **Numeric distributions:** for nine fields, a raw summary (min, max, mean,
+   median, 1st to 99th percentiles), skewness, a histogram and a boxplot.
+5. **EDA questions:** the handbook's six questions. Each answer states which
+   rows it uses and which it leaves out.
+6. **Save:** the filtered dataset, reloaded after saving to check its shape and
+   that every row is Residential.
+
+**What is removed:** only non-Residential rows and the columns more than 90%
+missing. Every flagged row stays in the saved dataset.
+
+How values are flagged in `review_flags.csv`:
+
+- **Impossible values** break a field's definition: a close, list or original
+  list price of $0 or less, a living area of 0 or less, negative days on
+  market, or coordinates of 0, 0.
+- **Review thresholds** are cut-offs chosen for this project. Values beyond
+  them are unusual and worth checking, not proven errors:
+  - More than 3 × IQR beyond the 25th or 75th percentile. For right-skewed
+    fields this is measured on a log scale, which works out to
+    low = Q1 ÷ (Q3/Q1)³ and high = Q3 × (Q3/Q1)³. For ClosePrice that is
+    $49,756 to $15,023,457.
+  - Days on market over 3,650 (10 years).
+  - A close price more than 3 times, or less than a third of, the list price.
+  - A year built after the sale year (possibly a pre-construction sale).
+- **Other checks:** date order, repeated ListingKeys, non-dwelling subtypes
+  and sales outside California.
+
+The saved dataset has a `RowNumber` column (1 = first data row), and every flag
+points at a RowNumber. A ListingKey can appear in more than one row, so it
+can't identify a row on its own.
+
+### Outputs (in `output/week2_3/`, not committed)
+
+| File | Contents |
+|---|---|
+| `sold_residential_filtered.csv` | Filtered dataset: 495,070 rows × 71 columns (70 kept columns + `RowNumber`) |
+| `column_summary.csv` | Null-count table for all 85 columns: count, %, over-90% flag, core field, decision and reason |
+| `possible_hidden_missing.csv` | Values that may stand in for missing data |
+| `numeric_summary.csv` | Raw distribution summary, skewness and review thresholds for the nine fields |
+| `county_median_prices.csv` | Median close price and sale count per county |
+| `review_flags.csv` | One row per flag: RowNumber, ListingKey, category, field, value and detail |
+| `figures/*.png` | Histogram + boxplot for each of the nine fields |
+| `eda_report.md` | Everything above as one readable report |
+
+### Results (run on 2026-10-09)
+
+- **Property types:** 8 values in 736,168 closed sales. Residential is 495,070
+  (67.25%); ResidentialLease is next at 169,403 (23.01%). The filter keeps
+  495,070 rows, the same as the Week 1 output.
+- **Missing values:** 15 of 85 columns are more than 90% missing (8 of them
+  completely empty) and are dropped. No core field is near the threshold; the
+  least complete is LotSizeAcres at 7.67%.
+- **Raw summary of the deliverable fields** (every non-missing value,
+  including impossible and unusual ones; 1st to 99th percentiles are in
+  `numeric_summary.csv`):
+
+  | | ClosePrice | LivingArea (sq ft) | DaysOnMarket |
+  |---|---:|---:|---:|
+  | count | 495,068 | 494,796 | 495,070 |
+  | min | $0 | 0 | −288 |
+  | 25th percentile | $575,000 | 1,250 | 8 |
+  | median | $825,000 | 1,648 | 19 |
+  | mean | $1,189,912 | 1,902.7 | 37.6 |
+  | 75th percentile | $1,300,000 | 2,227 | 49 |
+  | max | $989,500,000 | 17,021,321 | 12,430 |
+
+- **Shape** (skewness within the 1st to 99th percentiles): prices, living
+  area, lot size and days on market are strongly right-skewed and bathrooms
+  moderately; bedrooms and year built are roughly symmetric.
+- **EDA questions:**
+  - *Residential share:* 67.25% of all 736,168 closed sales.
+  - *Close price* (495,067 sales above $0; 2 missing and 1 at $0 left out):
+    median $825,000, mean $1,189,915. The raw mean of $1,189,912 differs only
+    because it includes the $0 sale. Leaving out the 811 prices beyond the
+    review thresholds gives a mean of $1,120,959.
+  - *Days on market* (495,014 sales; 56 negative values left out): median 19
+    days. 62.6% went under contract within 30 days and 0.21% took more than a
+    year.
+  - *Price vs list price* (495,067 sales with both prices above $0): 39.63%
+    sold above, 17.44% at and 42.93% below. Against the original list price
+    (494,166 sales): 36.94% above, 11.59% at, 51.47% below.
+  - *Date consistency:* the three date-order rules are broken 632 times by 557
+    rows; 75 rows break two or more.
+  - *Highest median prices* (counties with 100+ sales): San Mateo $1,700,000,
+    Santa Clara $1,590,000 and San Francisco $1,200,000.
+- **Flags for the cleaning step:** 26,619 flags on 24,282 rows (23,903
+  ListingKeys). They include 282 impossible values, 128 non-dwelling records,
+  32 sales outside California and 375 repeated ListingKeys, 48 of which are
+  exact copies within one monthly file.
+
+These results pool monthly files from different sources and snapshot dates
+(see *Known limitations*), so month-to-month comparisons should allow for that.
