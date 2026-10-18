@@ -20,6 +20,7 @@ saved as new CSVs, ready for analysis over time.
 |---|---|
 | `week1_aggregate.py` | **Week 1 deliverable.** Combines the monthly files, filters to Residential, saves the outputs, and records row counts. |
 | `week2_3_eda.py` | **Weeks 2–3 deliverable.** Inspects and validates the sold data: property types, Residential filter, missing values, numeric distributions with charts, EDA questions. Saves the filtered dataset. |
+| `week2_3_mortgage_rates.py` | **Weeks 2–3 (continued) deliverable.** Fetches the FRED 30-year mortgage rate, averages it by month and merges it onto the combined sold and listings datasets. |
 | `download_missing_months.py` | Downloads any month that is missing or damaged, checks it, and saves it to `csv/`. |
 | `crmls_listed.py` | Original single-month script for listings (filtered by `ListingContractDate`). |
 | `crmls_sold.py` | Original single-month script for closed sales (filtered by `CloseDate` and `MlsStatus = 'Closed'`). |
@@ -128,6 +129,7 @@ python download_missing_months.py                     # download them
 python download_missing_months.py --compare-existing  # compare local row counts with the API today
 python week1_aggregate.py                             # build the Week 1 datasets
 python week2_3_eda.py                                 # Weeks 2-3 validation and EDA (sold)
+python week2_3_mortgage_rates.py                      # add the FRED mortgage rate (needs internet)
 ```
 
 ---
@@ -324,3 +326,68 @@ can't identify a row on its own.
 
 These results pool monthly files from different sources and snapshot dates
 (see *Known limitations*), so month-to-month comparisons should allow for that.
+
+---
+
+## Weeks 2–3 (continued) – Mortgage Rate Enrichment
+
+**Goal:** add the national 30-year fixed mortgage rate to every sale and
+listing, so later analysis can relate the market to borrowing costs.
+
+**Deliverable:** [`week2_3_mortgage_rates.py`](week2_3_mortgage_rates.py)
+
+**Requires:**
+- `pandas` and `requests`
+- `week1_aggregate.py` in the same folder, because the script imports
+  `OUTPUT_DIR` from it
+- both Week 1 combined CSVs, `output/combined_sold_residential.csv` and
+  `output/combined_listings_residential.csv` (run `week1_aggregate.py` first)
+- an internet connection, to fetch the series from FRED
+
+### What the script does
+
+1. **Fetch:** downloads FRED series `MORTGAGE30US` (Freddie Mac, weekly, in
+   percent) directly as a CSV. No API key is needed, but it needs internet.
+2. **Resample:** averages the weekly readings in each calendar month.
+3. **Key:** builds `year_month` from `CloseDate` for sold rows and from
+   `ListingContractDate` for listings.
+4. **Merge:** left-merges the monthly rate onto both Week 1 combined datasets
+   (`combined_sold_residential.csv` and `combined_listings_residential.csv`).
+   The merge is checked to be many-to-one, so no row can be duplicated.
+5. **Validate:** stops with an error, and saves nothing for that dataset, if any
+   row has a null `rate_30yr_fixed` or the row count changed.
+6. **Save:** both enriched datasets, reloaded after saving to confirm the row
+   count and that no rate is null.
+
+### Outputs (in `output/mortgage_rates/`, not committed)
+
+All outputs are saved locally under `output/mortgage_rates/`, which is
+git-ignored. The enriched CSVs are therefore not in this repository; submit
+them separately if they are required.
+
+| File | Contents |
+|---|---|
+| `sold_with_rates.csv` | Sold dataset + `year_month` + `rate_30yr_fixed` |
+| `listings_with_rates.csv` | Listings dataset + `year_month` + `rate_30yr_fixed` |
+| `mortgage30us_weekly.csv` | Weekly observations used to calculate monthly averages |
+| `mortgage30us_monthly.csv` | Monthly average rate and number of weekly readings |
+
+### Results (run on 2026-10-17)
+
+| | Sold | Listings |
+|---|---:|---:|
+| Rows before and after merge | 495,070 | 665,579 |
+| Columns after merge | 86 (84 + 2) | 75 (73 + 2) |
+| Months covered | 2024-01 to 2026-09 (33) | 2024-01 to 2026-09 (33) |
+| Null `rate_30yr_fixed` | 0 | 0 |
+
+- FRED returned 2,899 weekly readings, from 1971-04-02 to 2026-10-15, with no
+  blanks. Each of the 33 months used has 4 or 5 weekly readings.
+- The monthly average ranged from 6.048% (February 2026) to 7.060% (May 2024).
+- Checked independently: every original column is unchanged from Week 1,
+  `year_month` matches the date column's year and month, and every rate equals
+  a separately computed monthly mean.
+
+FRED can revise past readings, so a later run may give slightly different
+rates. `mortgage30us_weekly.csv` keeps the weekly observations this run used
+to calculate the monthly averages.
