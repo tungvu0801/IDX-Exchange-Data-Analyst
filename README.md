@@ -22,6 +22,7 @@ saved as new CSVs, ready for analysis over time.
 | `week2_3_eda.py` | **Weeks 2–3 deliverable.** Inspects and validates the sold data: property types, Residential filter, missing values, numeric distributions with charts, EDA questions. Saves the filtered dataset. |
 | `week2_3_mortgage_rates.py` | **Weeks 2–3 (continued) deliverable.** Fetches the FRED 30-year mortgage rate, averages it by month and merges it onto the combined sold and listings datasets. |
 | `week4_5_cleaning.py` | **Weeks 4–5 deliverable.** Cleans both enriched datasets: types, impossible values, date-order and geographic flags, duplicates. Saves the cleaned files and a cleaning summary. |
+| `test_week4_5_cleaning.py` | Regression tests for `week4_5_cleaning.py` on a small synthetic file (no real data needed). |
 | `download_missing_months.py` | Downloads any month that is missing or damaged, checks it, and saves it to `csv/`. |
 | `crmls_listed.py` | Original single-month script for listings (filtered by `ListingContractDate`). |
 | `crmls_sold.py` | Original single-month script for closed sales (filtered by `CloseDate` and `MlsStatus = 'Closed'`). |
@@ -418,6 +419,16 @@ No internet is needed.
 
 **Run:** `python week4_5_cleaning.py`
 
+**Tests:** `python test_week4_5_cleaning.py` (standard-library `unittest`). The
+tests run the cleaning on an 8-row synthetic file and check:
+- an invalid date is exported blank and its original text is kept;
+- a missing coordinate next to an invalid one;
+- repeated keys versus missing keys;
+- date checks that pass, fail or can't be evaluated;
+- leading-zero identifiers, row counts, `year_month` and mortgage rates are
+  preserved;
+- no pandas warnings are raised.
+
 ### Transformations and why
 
 | Step | What it does | Why |
@@ -429,6 +440,7 @@ No internet is needed.
 | Dates | Parses `CloseDate`, `PurchaseContractDate`, `ListingContractDate` and `ContractStatusChangeDate` with the exact format `YYYY-MM-DD` | That is the only format in the inputs. There are no time parts or time zones, so no date can shift. Missing dates stay missing |
 | Numbers | Converts 22 columns (prices, areas, lot sizes, days on market, bedrooms, bathrooms, year built, stories, garage and parking, coordinates, mortgage rate) with Python's `float()`. Whole-number fields become nullable integers | The inputs contain no `$`, commas or spaces. `float()` returns the binary floating-point value nearest to the text. The inputs were written in shortest round-trip form, so each value reads back as the same float and is written out as the same text. pandas' faster parser isn't always correctly rounded: it read `6.1899999999999995` as a neighbouring float that prints as `6.19`. Neither approach is exact decimal arithmetic |
 | True/False | The `*YN` fields, `latfilled` and `lonfilled` become nullable booleans; blanks stay missing | What a blank means is not documented |
+| Values that fail to convert | A date, number or True/False value that can't be converted (for example the date `2024-02-30`) is exported blank. Its original text goes into `<column>_unparsed_original` and `parse_failure_flag` is set. That column is only created when something fails, so the current run has none | Dates and coordinates are never repaired or guessed |
 | Impossible values | Flags the row, copies the original into `<column>_invalid_original`, and sets the analytical value to null | Keeps an audit trail while stopping impossible values from distorting statistics |
 | No imputation | No missing price, area, bedroom count, bathroom count, date or coordinate is filled in | |
 
@@ -450,13 +462,26 @@ No internet is needed.
 | `invalid_coordinate_range_flag` | Latitude outside [−90, 90] or Longitude outside [−180, 180] | 2 | 6 |
 | `outside_ca_bbox_flag` | Potential geographic issue: outside latitude 32.5 to 42.1 or longitude −124.5 to −114.1 | 117 | 405 |
 | `duplicate_record_flag` | Identical, as raw text, to an earlier row in every input column (86 in sold, 75 in listings). Only the later copies are flagged, so the count is excess rows | 48 | 0 |
-| `repeated_listing_key_flag` | ListingKey appears in more than one row; every such row is flagged | 754 (375 keys) | 404 (201 keys) |
+| `missing_listing_key_flag` | ListingKey is missing | 0 | 0 |
+| `repeated_listing_key_flag` | A non-missing ListingKey appears in more than one row; every such row is flagged. Missing keys never count as repeated | 754 (375 keys) | 404 (201 keys) |
 | `parse_failure_flag` | A non-missing date, number or True/False value failed to convert | 0 | 0 |
-| `any_quality_issue_flag` | Any of the flags above | 6,422 | 83,103 |
+| `any_quality_issue_flag` | Any of the `_flag` columns above. The `*_evaluable` columns are not included | 6,422 | 83,103 |
 
-- **Date flags:** equal dates are allowed. A row missing either date is not
-  evaluated: its flag is False, but it was not checked. Rows not evaluated:
-  - sold: 1, 197 and 198 for the three flags in table order;
+- **Date flags:** equal dates are allowed. Each rule also has a
+  `<rule>_evaluable` column (`listing_after_close_evaluable`,
+  `purchase_after_close_evaluable`, `negative_timeline_evaluable`). It is True
+  when both of the rule's dates are present and valid. Together the two columns
+  give three states:
+
+  | `_evaluable` | `_flag` | Meaning |
+  |---|---|---|
+  | True | False | Checked and passed |
+  | True | True | Checked and failed |
+  | False | False | Not checked: a date is missing or unparseable. The flag is always False here, so False alone doesn't mean "passed" |
+
+  An evaluable column only records whether a check could run; it is not a
+  quality issue. Rows not evaluated, for the three rules in table order:
+  - sold: 1, 197 and 198;
   - listings: 446,765, 446,796 and 332,462, mostly unsold listings with no
     CloseDate.
 - **Close-date flags on listings that aren't Closed are diagnostic only.**
@@ -466,8 +491,21 @@ No internet is needed.
   - `listing_after_close_flag` flags only Closed listings;
   - `negative_timeline_flag` doesn't use CloseDate. It also flags 42 Pending
     and 17 ActiveUnderContract listings.
-- **Geographic flags:** rows missing a coordinate are not evaluated by the
-  other four geographic checks.
+- **Geographic flags:** each check uses whatever coordinates it can:
+  - `missing_coordinates_flag` is evaluated on every row.
+  - `zero_coordinate_flag` and `invalid_coordinate_range_flag` check each
+    coordinate that is present. A row with only a Longitude of `329.0` is still
+    flagged as out of range.
+  - `positive_longitude_flag` needs Longitude.
+  - `outside_ca_bbox_flag` needs both coordinates.
+
+  When a check can't run, its flag is False. `cleaning_summary.csv` reports
+  each skipped check as `<flag>: not evaluable`, along with the number of rows
+  with only one coordinate. In the current data no row has just one
+  coordinate, so every geographic check skipped the same rows: 4,795 in sold
+  and 81,451 in listings. There are no geographic `_evaluable` columns,
+  because whether a check could run follows directly from which coordinates
+  are present.
 - **Bounding box:** a screening method, not proof of location. The box also
   covers parts of Nevada, Arizona, Oregon, Mexico and the ocean, so a point
   inside it is not proven to be in California. Coordinates are never changed,
@@ -477,28 +515,47 @@ No internet is needed.
 
 | Analysis | Exclude rows where | Note |
 |---|---|---|
-| Prices, price per square foot | `duplicate_record_flag` | Impossible ClosePrice and LivingArea values are already null, so they drop out of averages automatically |
-| Completed-sale timing (days on market, contract to close) | Records that aren't Closed (use sold, which is all Closed, or listings with `MlsStatus == 'Closed'`); rows missing a date the measure needs; `duplicate_record_flag`; any of the three date flags | Negative DaysOnMarket values are already null. Close-date flags on non-Closed listings are diagnostic only |
+| Prices, price per square foot | Apply the duplicate policy below. Don't exclude rows for missing or flagged coordinates | Impossible ClosePrice and LivingArea values are already null, so they drop out of averages automatically. A price is valid without a location |
+| Completed-sale timing (days on market, contract to close) | Records that aren't Closed (use sold, which is all Closed, or listings with `MlsStatus == 'Closed'`); rows where the measure's `*_evaluable` column is False; rows where its date flag is True; then apply the duplicate policy | Negative DaysOnMarket values are already null. Close-date flags on non-Closed listings are diagnostic only |
 | Maps and location analysis | `missing_coordinates_flag`, `zero_coordinate_flag`, `positive_longitude_flag`, `invalid_coordinate_range_flag`; review `outside_ca_bbox_flag` | Some rows outside the box are genuine out-of-state properties |
-| Monthly counts and volumes | `duplicate_record_flag`; consider `repeated_listing_key_flag` | A repeated key may be the same home counted twice |
+| Monthly counts and volumes | Apply the duplicate policy; consider `repeated_listing_key_flag` and `missing_listing_key_flag` | A repeated key may be the same home counted twice |
 
-Don't filter on `any_quality_issue_flag` for every analysis. It includes
-missing coordinates (12% of listings), which don't matter for a price analysis.
+- **Choose the flags for each analysis.** Don't filter on
+  `any_quality_issue_flag` everywhere. It includes missing coordinates (12% of
+  listings), which don't invalidate a price, date or count analysis.
+- **Duplicates need an explicit policy downstream.** The 48 exact duplicate
+  rows in sold are kept, and the script does not deduplicate. Each analysis
+  should state its choice:
+  - exclude rows with `duplicate_record_flag`, which keeps the first copy and
+    counts each record once;
+  - or keep every row, and say so.
 
-### Results (run on 2026-10-17)
+  Repeated ListingKeys that aren't exact duplicates are a separate question,
+  and the cleaning doesn't resolve them.
+- **No outliers are removed.** Only impossible values (such as a price ≤ 0) are
+  blanked. Choosing outlier thresholds is left to each analysis.
+
+### Results (run on 2026-10-24)
 
 | | Sold | Listings |
 |---|---:|---:|
 | Rows before → after | 495,070 → 495,070 | 665,579 → 665,579 |
-| Columns before → after | 86 → 99 | 75 → 88 |
+| Columns before → after | 86 → 103 | 75 → 92 |
 | Dates that failed to parse | 0 | 0 |
 | Numbers that failed to convert | 0 | 0 |
 | Rows with any date flag | 557 (75 with two or more) | 590 (91 with two or more) |
 | Rows with any geographic flag | 4,912 | 81,856 |
 | Rows with any quality flag | 6,422 | 83,103 |
 
-- **Columns after:** 9 columns are dropped, and 5 audit columns
-  (`<column>_invalid_original`) and 17 flag columns are added.
+- **Columns after:** 9 columns are dropped, and three groups are added at the
+  end in this order:
+  - 5 audit columns (`<column>_invalid_original`);
+  - 3 `*_evaluable` columns;
+  - 18 flag columns (17 `_flag` columns plus `any_quality_issue_flag`).
+- **Changes since the 2026-10-17 run:** this run adds `missing_listing_key_flag`
+  and the three `*_evaluable` columns. All 99 (sold) and 88 (listings) earlier
+  columns are byte-identical to the earlier output. Because no ListingKey is
+  missing, the repeated-key counts and every other count are unchanged.
 - **Missing dates, sold:** PurchaseContractDate 197, ListingContractDate 1,
   ContractStatusChangeDate 594.
 - **Missing dates, listings:** CloseDate is missing in 446,765 rows. All of them
@@ -512,10 +569,21 @@ missing coordinates (12% of listings), which don't matter for a price analysis.
     (listings) month in every row.
   - `rate_30yr_fixed` is unchanged and never null.
   - Every flag matches an independent recomputation from the input text.
+  - Each `*_evaluable` column is True exactly when both dates are present.
+    No date flag is True on a row that couldn't be evaluated.
 - **How the output text compares with the input:** checked column by column
-  after reloading. The script's own reload check covers ListingKey, the four
-  dates, `year_month` and `rate_30yr_fixed`; the independent check covered
-  every kept column.
+  after reloading. The script's own reload check (the `saved file` rows in
+  `cleaning_summary.csv`) confirms:
+  - Every identifier (ListingKey, ListingId, PostalCode, BuyerAgentMlsId,
+    UnparsedAddress), `year_month` and `rate_30yr_fixed` is text-identical to
+    the input.
+  - Each exported date equals its parsed value.
+  - The original text of any unparseable date is in its
+    `<column>_unparsed_original` column.
+  - The flag and `*_evaluable` columns hold only True/False, with the same
+    counts as in memory.
+
+  The independent check covered every kept column.
 
   | | Sold (77 kept columns) | Listings (66 kept columns) |
   |---|---|---|
@@ -527,9 +595,9 @@ missing coordinates (12% of listings), which don't matter for a price analysis.
 
 | File | Contents |
 |---|---|
-| `sold_cleaned.csv` | Cleaned sold data, audit columns and flags |
-| `listings_cleaned.csv` | Cleaned listings data, audit columns and flags |
-| `cleaning_summary.csv` | One row per reported count for both datasets (`dataset`, `section`, `item`, `count`, `detail`): shapes, dropped columns and reasons, missing values before and after, parse failures, invalid values, flag counts, rows not evaluated, in-memory dtypes, validation results and the saved-file check |
+| `sold_cleaned.csv` | Cleaned sold data, audit columns, evaluable columns and flags |
+| `listings_cleaned.csv` | Cleaned listings data, audit columns, evaluable columns and flags |
+| `cleaning_summary.csv` | One row per reported count for both datasets (`dataset`, `section`, `item`, `count`, `detail`): shapes, dropped columns and reasons, missing values before and after, parse failures, invalid values, flag counts, rows not evaluated per check, missing and repeated ListingKeys, in-memory dtypes, validation results and the saved-file check |
 
 The cleaned CSVs are not in this repository; submit them separately if they are
 required.
@@ -544,21 +612,45 @@ import pandas as pd
 
 DATES = ["CloseDate", "PurchaseContractDate", "ListingContractDate", "ContractStatusChangeDate"]
 TEXT = ["ListingKey", "ListingId", "PostalCode", "BuyerAgentMlsId", "StreetNumberNumeric", "year_month"]
-sold = pd.read_csv("output/cleaned/sold_cleaned.csv", dtype={c: "string" for c in TEXT},
-                   parse_dates=DATES, date_format="%Y-%m-%d", low_memory=False)
+WHOLE = ["DaysOnMarket", "BedroomsTotal", "BathroomsTotalInteger", "MainLevelBedrooms", "YearBuilt", "Stories"]
+YES_NO = ["ViewYN", "WaterfrontYN", "BasementYN", "PoolPrivateYN", "AttachedGarageYN", "FireplaceYN",
+          "NewConstructionYN", "latfilled", "lonfilled"]
+sold = pd.read_csv("output/cleaned/sold_cleaned.csv",
+                   dtype={**{c: "string" for c in TEXT}, **{c: "Int64" for c in WHOLE},
+                          **{c: "boolean" for c in YES_NO}},
+                   parse_dates=DATES, date_format="%Y-%m-%d",
+                   float_precision="round_trip", low_memory=False)
+sold["year_month"] = pd.PeriodIndex(sold["year_month"], freq="M")  # optional
 ```
 
-Flag columns come back as `bool` automatically. Whole-number columns such as
-`BedroomsTotal` come back as decimals unless `"Int64"` is added to `dtype`.
+Tested on the 2026-10-24 sold output. It returns 495,070 rows and keeps the 40
+leading-zero `BuyerAgentMlsId` values. What each group comes back as:
+
+| Columns | Type after reloading | Without the snippet |
+|---|---|---|
+| Flags and `*_evaluable` | `bool` (never blank) | Same: `bool` automatically |
+| Identifiers, `StreetNumberNumeric` | `string`, leading zeros kept | `ListingKey` becomes `int64`. The others stay text only because some of their values aren't numeric, which a future file may not guarantee |
+| The four dates | `datetime64`; unparseable and missing dates are `NaT` | Text |
+| Whole-number fields | `Int64` (nullable) | `float64` |
+| `*YN`, `latfilled`, `lonfilled` | `boolean`; blanks stay `<NA>` | `object`, because of the blanks |
+| `year_month` | `period[M]` after the last line | Text such as `2024-02` |
+| `rate_30yr_fixed` and other decimals | `float64`, read exactly | `float64`, but pandas' default parser can change the last digit (`6.1899999999999995` → `6.19`) |
+| `<column>_invalid_original` | `float64`; add `"string"` to `dtype` to keep the exact original text | `float64` |
+| `<column>_unparsed_original` | Only present if a value failed to convert (none in this run); add `"string"` to `dtype` | — |
+
+The listings file loads the same way from `listings_cleaned.csv`. First remove
+the columns it doesn't have (`ViewYN`, `WaterfrontYN`, `BasementYN`,
+`PoolPrivateYN`, `latfilled`, `lonfilled`) from `YES_NO`.
 
 ### Limitations and open decisions
 
 - **Duplicates:** sold has 48 pairs of identical rows (96 rows). The 48 later
-  copies carry `duplicate_record_flag` and are kept; exclude them to count each
-  record once.
+  copies carry `duplicate_record_flag` and are kept. Each analysis must
+  explicitly choose whether to exclude them (see *Which flags to filter on*).
 - **Repeated ListingKeys:** sold has 754 rows across 375 keys (379 rows beyond
-  the first per key), and listings 404 rows across 201 keys. Why they repeat has
-  not been verified.
+  the first per key), and listings 404 rows across 201 keys (203 beyond the
+  first). Why they repeat has not been verified. No ListingKey is missing in
+  either dataset.
 - **CloseDate on unsold listings:** 23,256 listings that aren't Closed (mostly
   Pending) have a CloseDate whose meaning is unverified; it may be a scheduled
   date. Close-date flags on these rows are diagnostic only. Restrict
