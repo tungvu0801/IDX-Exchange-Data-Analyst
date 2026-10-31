@@ -23,6 +23,8 @@ saved as new CSVs, ready for analysis over time.
 | `week2_3_mortgage_rates.py` | **Weeks 2–3 (continued) deliverable.** Fetches the FRED 30-year mortgage rate, averages it by month and merges it onto the combined sold and listings datasets. |
 | `week4_5_cleaning.py` | **Weeks 4–5 deliverable.** Cleans both enriched datasets: types, impossible values, date-order and geographic flags, duplicates. Saves the cleaned files and a cleaning summary. |
 | `test_week4_5_cleaning.py` | Regression tests for `week4_5_cleaning.py` on a small synthetic file (no real data needed). |
+| `week6_feature_engineering.py` | **Week 6 deliverable.** Adds the market metrics and school districts to both cleaned datasets, and saves segmented summaries, a sample and a validation report. |
+| `test_week6_feature_engineering.py` | Regression tests for `week6_feature_engineering.py` on synthetic data and synthetic district polygons. |
 | `download_missing_months.py` | Downloads any month that is missing or damaged, checks it, and saves it to `csv/`. |
 | `crmls_listed.py` | Original single-month script for listings (filtered by `ListingContractDate`). |
 | `crmls_sold.py` | Original single-month script for closed sales (filtered by `CloseDate` and `MlsStatus = 'Closed'`). |
@@ -34,7 +36,9 @@ following local folders:
 
 ```
 csv/            raw monthly files (CRMLSListingYYYYMM.csv, CRMLSSoldYYYYMM.csv)
-output/         combined datasets and run_report.txt (Week 1); week2_3/ (Weeks 2–3)
+output/         combined datasets and run_report.txt (Week 1); week2_3/ and mortgage_rates/
+                (Weeks 2–3); cleaned/ (Weeks 4–5); week6/ (Week 6, including the downloaded
+                school district boundaries)
 backup/         copies of raw files that were replaced
 downloads_tmp/  in-progress downloads and the download log
 .env            API key (local only)
@@ -108,7 +112,9 @@ not a confirmed IDX requirement. What `_filled` means (it adds `latfilled` and
 
 ## How to run
 
-**Requirements:** Python 3.12, `pandas`, `requests`, `matplotlib`
+**Requirements:** Python 3.12, `pandas` (with `numpy`), `requests`, `matplotlib`.
+No GIS library is needed. Week 6 uses matplotlib's point-in-polygon test for
+the school districts.
 
 ```bash
 pip install pandas requests matplotlib
@@ -133,6 +139,9 @@ python week1_aggregate.py                             # build the Week 1 dataset
 python week2_3_eda.py                                 # Weeks 2-3 validation and EDA (sold)
 python week2_3_mortgage_rates.py                      # add the FRED mortgage rate (needs internet)
 python week4_5_cleaning.py                            # Weeks 4-5 cleaning and quality flags
+python week6_feature_engineering.py                   # Week 6 metrics, school districts, summaries
+python test_week4_5_cleaning.py                       # tests (synthetic data, no real files needed)
+python test_week6_feature_engineering.py
 ```
 
 ---
@@ -666,3 +675,377 @@ the columns it doesn't have (`ViewYN`, `WaterfrontYN`, `BasementYN`,
   values. What they mean is not documented.
 - **Mixed sources:** the inputs come from monthly files from different sources
   and dates (see *Known limitations*).
+
+---
+
+## Week 6 – Feature Engineering and Market Metrics
+
+**Goal:** add the market metrics that will feed the Tableau dashboards, add
+California school districts from each property's coordinates, and summarize the
+metrics by segment. No row is added, removed or deduplicated, and every input
+column is kept exactly as it was.
+
+**Deliverable:** [`week6_feature_engineering.py`](week6_feature_engineering.py)
+
+**Requires:**
+- `pandas`, `numpy`, `matplotlib`, and `requests` (for the one-time boundary
+  download)
+- `week1_aggregate.py` and `week4_5_cleaning.py`, whose helpers it reuses
+- the two cleaned inputs (run `week4_5_cleaning.py` first)
+
+Internet is needed only on the first run, to download the boundaries. The script
+stops with an error if a cleaned input is missing; it never reruns earlier
+stages.
+
+**Inputs (read only, never modified; their SHA-256 hashes were identical before
+and after the run):**
+- `output/cleaned/sold_cleaned.csv` (495,070 rows × 103 columns)
+- `output/cleaned/listings_cleaned.csv` (665,579 rows × 92 columns)
+
+Both files are from the cleaning run of 2026-10-25, and the counts above were
+checked against them on 2026-10-31.
+
+**Run:** `python week6_feature_engineering.py` (about 3 minutes)
+
+**Tests:** `python test_week6_feature_engineering.py` runs 11 tests on a
+synthetic 15-row file and synthetic district polygons. They cover:
+- division by zero and missing or invalid inputs;
+- the two handbook ratios being identical (values, null mask and reasons), and
+  the extra ratio dividing by ListPrice;
+- `YrMo` against `year_month` on each dataset's date basis, including a
+  deliberately wrong sold `year_month` that must raise an error;
+- dates out of order, and equal dates;
+- records that aren't Closed;
+- preservation of identifiers and every input column;
+- excluding duplicates from the summaries only;
+- that the spatial join preserves rows (shared locations, overlapping
+  Elementary and High districts, an ambiguous overlap, a hole, a
+  MultiPolygon, and missing, invalid and out-of-state coordinates);
+- that no pandas warnings are raised.
+
+The tests were also run against five deliberately broken versions of the
+script, and each one was caught:
+- the denominator check removed;
+- every record treated as Closed;
+- the date-order flags ignored;
+- a repeated key in the spatial lookup;
+- `price_ratio` switched back to ListPrice.
+
+### Requirements: verified versus interpreted
+
+**Verified** against the Week 6 section of the intern handbook
+(`IDX_Exchange_Intern_Handbook_Final-version5.docx`):
+- the metric table: names, formulas and purposes;
+- adding school districts from latitude and longitude using the linked
+  data.ca.gov resource;
+- segment analysis by:
+  - PropertyType and PropertySubType;
+  - CountyOrParish and MLSAreaMajor;
+  - ListOfficeName and BuyerOfficeName;
+- the deliverable: a `.py` script, a sample output table showing the new
+  columns, and at least one summary grouped by PropertyType or CountyOrParish.
+
+**The two ratios follow the handbook literally.** The handbook gives
+ClosePrice / OriginalListPrice for both Price Ratio ("negotiation strength") and
+Close to Original List Ratio ("full price reduction history"), and the script
+uses exactly that (`PRICE_RATIO_DENOMINATOR = "OriginalListPrice"`). So
+`price_ratio` and `close_to_original_list_ratio` are identical: the same
+formula, eligibility rules, values, nulls and null reasons. Every run checks
+this.
+
+**Added beyond the handbook:** `close_to_current_list_ratio` = ClosePrice /
+ListPrice, with its own null-reason column. It is an extra analytical metric
+(sale price against the list price at the time of sale). It is **not** a
+handbook requirement and does not replace either required ratio.
+
+**Choices** (the handbook doesn't state these):
+- Completed-sale metrics are filled only for Closed records.
+- Every metric has a `*_null_reason` column.
+- Exact duplicates are excluded from the summaries.
+- The summary statistics are my choice.
+- Column names other than `Year`, `Month` and `YrMo` are my own, and `YrMo` is
+  written as `YYYY-MM`.
+
+### Metrics
+
+| Column | Formula | Filled for | Null when (first failing check, in this order) |
+|---|---|---|---|
+| `price_ratio` (handbook) | ClosePrice / OriginalListPrice | Closed | not Closed; ClosePrice missing, invalid or ≤ 0; OriginalListPrice missing or ≤ 0 |
+| `close_to_original_list_ratio` (handbook) | ClosePrice / OriginalListPrice (identical to `price_ratio`) | Closed | the same as `price_ratio` |
+| `close_to_current_list_ratio` (extra, not in the handbook) | ClosePrice / ListPrice | Closed | not Closed; ClosePrice as above; ListPrice missing or ≤ 0 |
+| `price_per_sqft` | ClosePrice / LivingArea | Closed | not Closed; ClosePrice as above; LivingArea missing, invalid or ≤ 0 |
+| `DaysOnMarket` | The MLS field itself, as cleaned. Not a new column, and not recomputed from dates | (existing) | Negative values were set to null in cleaning; the originals are in `DaysOnMarket_invalid_original` |
+| `Year`, `Month`, `YrMo` | CloseDate's year, month and `YYYY-MM` | Closed | not Closed; CloseDate missing |
+| `listing_to_contract_days` | PurchaseContractDate − ListingContractDate, in days | Any status (it uses no close field) | a date missing; `negative_timeline_evaluable` False; `negative_timeline_flag` True |
+| `contract_to_close_days` | CloseDate − PurchaseContractDate, in days | Closed | not Closed; a date missing; `purchase_after_close_evaluable` False; `purchase_after_close_flag` True |
+
+- **Nulls and reasons:**
+  - A denominator must be greater than 0, so there is never a division by zero
+    or an infinite value.
+  - A metric is null exactly when its `*_null_reason` is filled. `Year`,
+    `Month` and `YrMo` share `YrMo_null_reason`.
+  - Reasons look like `OriginalListPrice <= 0`, `LivingArea missing`,
+    `not Closed (MlsStatus Pending)`, or
+    `PurchaseContractDate after CloseDate (purchase_after_close_flag)`.
+- **Why only Closed records:** on listings that aren't Closed, CloseDate may be
+  a future or scheduled date (it runs to 2030-04-16), and 5 such listings have
+  a ClosePrice. Their completed-sale metrics are left null.
+- **Date flags are respected:**
+  - an interval is computed only where the cleaning's `*_evaluable` column is
+    True and its flag is False;
+  - equal dates give 0 days;
+  - `Year`, `Month` and `YrMo` don't depend on the date-order flags, just as
+    `year_month` doesn't.
+- **Days on market:** the script reports Closed records with a value, zeros,
+  and values set to null in cleaning. In the summaries, DaysOnMarket counts
+  only Closed records. On other listings it is days so far, not time to sell.
+- **Precision:** numbers are read with Python's `float()`, as in Weeks 4–5, and
+  written in shortest round-trip form. After saving, every metric is reloaded
+  and compared exactly. It is also checked against an independent
+  recomputation that uses pandas' own parser.
+
+### School districts
+
+- **Source:** *California School District Areas 2024-25* from the California
+  Department of Education. This is the dataset the handbook links to; CDE
+  calls the layer "the authoritative geographic data source for all school
+  district area boundaries in California".
+  - Vintage: the 2024-25 academic year. The layer data was last edited on
+    2026-03-10.
+  - Contents: 937 districts (516 Elementary, 76 High, 345 Unified).
+- **File and coordinate system:**
+  - The handbook's link is a shapefile in Web Mercator (EPSG:3857). The script
+    downloads the same layer as GeoJSON, which is longitude/latitude in WGS 84
+    (CRS84), so no reprojection library is needed.
+  - The two exports have identical sets of CDS codes, types and names.
+  - The file is saved to `output/week6/school_districts/`. The URL, download
+    time and SHA-256 hash are recorded in `source.json`, and the hash is
+    checked on every run.
+- **Coordinate systems: one documented, one assumed.**
+  - **Boundary file (documented, checked):** the handbook's shapefile declares
+    WGS 84 Web Mercator (EPSG:3857) in its `.prj`, and the map service reports
+    the same. The GeoJSON used here declares `urn:ogc:def:crs:OGC:1.3:CRS84`
+    (WGS 84 longitude/latitude), and its coordinates fall within California's
+    longitude/latitude range.
+  - **MLS `Latitude`/`Longitude` (assumed, not verified):** the matching
+    assumes WGS 84 decimal degrees and applies no transformation. The values
+    are in decimal-degree ranges, so they are geographic coordinates. But
+    nothing in the MLS export states their datum or CRS, and I haven't checked
+    the Trestle metadata, so the source CRS is unverified.
+  - If the MLS coordinates were NAD 83 instead, the two datums differ by
+    roughly 1–2 m in California. That's a general geodesy figure, not
+    measured here, and it would only matter for points very close to a
+    district boundary.
+- **Method:** each distinct coordinate pair (614,184 across both datasets) is
+  tested once against every district polygon, holes included. Each row then
+  looks up its pair. A lookup can't add or drop rows, and the script raises an
+  error if the lookup table has a repeated key.
+- **Which rows are matched:**
+  - Rows the cleaning flagged as missing, zero, out of range or with a
+    positive longitude are not matched. Coordinates are never repaired.
+  - Rows outside the bounding box are still tested. In this run none of them
+    fell inside a district.
+- **District types:** Elementary and High districts overlap by design, so each
+  type has its own columns: `elementary_district_name` / `_cds`,
+  `high_district_name` / `_cds` and `unified_district_name` / `_cds`. CDS
+  codes are text, so leading zeros are kept.
+- **Status columns:**
+  - `school_district_match_status`: `matched`, `ambiguous` (more than one
+    district of the same type; that type is left blank), `unmatched`,
+    `invalid coordinates` or `missing coordinates`;
+  - `school_district_match_count`: how many districts contain the point;
+  - `school_district_match_note`: the types matched, the competing CDS codes,
+    or the flag that blocked the match.
+- **Existing fields are unchanged:** `HighSchoolDistrict`, `ElementarySchool`,
+  `MiddleOrJuniorSchool` and `HighSchool` are kept as they were.
+- **Checked against the CDE's own map service:** 60 randomly generated points
+  were compared, and all 60 agreed (48 matched, 12 outside every district).
+  Random points were used so that no MLS coordinates were sent anywhere.
+
+| | Sold | Listings |
+|---|---:|---:|
+| Matched | 490,019 | 583,533 |
+| Ambiguous | 0 | 0 |
+| Unmatched | 174 (35 outside the CA box) | 401 (211 outside the box) |
+| Invalid coordinates (not matched) | 82 | 194 |
+| Missing coordinates (not matched) | 4,795 | 81,451 |
+| Matched, as a share of rows with usable coordinates | 99.96% | 99.93% |
+| Types matched: Unified / Elementary + High / Elementary + Unified / Elementary only | 368,765 / 118,803 / 2,000 / 451 | 446,614 / 133,668 / 2,776 / 475 |
+| MLS `HighSchoolDistrict` has exactly the same name as the match | 219,306 of 320,307 | 254,860 of 373,204 |
+
+- **Elementary + Unified:** some elementary districts sit inside a unified
+  district that serves their upper grades (for example Garvey Elementary and
+  Alhambra Unified). These rows count as matched.
+- **Elementary only:** almost all of these are Hermosa Beach City Elementary,
+  which no High or Unified polygon covers.
+- **Agreement with the MLS field:** most of the name differences are spelling
+  variants (`William S. Hart Union` → `William S. Hart Union High`,
+  `Newport Mesa Unified` → `Newport-Mesa Unified`). So the exact-name
+  agreement is only a sanity check, not an error rate.
+
+### Segmented summaries
+
+| File | Grouped by | Groups (sold / listings) |
+|---|---|---:|
+| `summary_by_property_type.csv` | PropertyType | 1 / 1 (all Residential) |
+| `summary_by_property_subtype.csv` | PropertyType + PropertySubType | 21 / 22 |
+| `summary_by_county.csv` | CountyOrParish | 63 / 63 |
+| `summary_by_county_mls_area.csv` | CountyOrParish + MLSAreaMajor | 1,317 / 1,402 |
+| `summary_by_list_office.csv` | ListOfficeName | 19,800 / 22,135 |
+| `summary_by_buyer_office.csv` | BuyerOfficeName | 22,710 / 15,648 |
+
+- **Columns:**
+  - each file has a `dataset` column (sold or listings), and a blank segment
+    value is shown as `(missing)`;
+  - counts: `records`, `duplicate_rows_excluded`, `records_used` and
+    `closed_records_used`;
+  - for each metric: `<metric>_n` (valid observations), `_median`, `_mean`,
+    `_p25` and `_p75`.
+- **Metrics summarized:** ClosePrice, price_ratio,
+  close_to_original_list_ratio, close_to_current_list_ratio (extra),
+  price_per_sqft, DaysOnMarket, listing_to_contract_days and
+  contract_to_close_days. The `price_ratio_*` and
+  `close_to_original_list_ratio_*` statistics are identical by design.
+- **Exclusions:**
+  - The 48 exact later duplicates in sold (`duplicate_record_flag`) are
+    excluded. Listings has none.
+  - Repeated ListingKeys that aren't exact duplicates (754 rows in sold, 404 in
+    listings) are kept.
+  - Each metric uses only the rows where it has a value. Rows are not dropped
+    for `any_quality_issue_flag`, so missing coordinates don't remove a sale
+    from the price statistics.
+- **Use sold for completed-sale statistics.** The listings summaries count only
+  Closed listings for those metrics. Their `listing_to_contract_days` also
+  includes Pending and ActiveUnderContract listings.
+- CoListOfficeName is in the data but is not summarized.
+
+The first five rows of `summary_by_county.csv` for sold (medians; exact
+duplicates excluded):
+
+| County | Sales | Close price | Price ratio = close / original list | Close / current list (extra) | $ per sq ft | Days on market | Listing to contract | Contract to close |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Los Angeles | 123,039 | 905,000 | 0.9988 | 1.0000 | 608.65 | 19 | 26 | 30 |
+| Riverside | 68,285 | 600,000 | 0.9854 | 1.0000 | 320.70 | 30 | 38 | 30 |
+| San Diego | 61,607 | 900,000 | 0.9918 | 1.0000 | 589.90 | 15 | 22 | 26 |
+| Orange | 55,759 | 1,185,000 | 0.9929 | 1.0000 | 675.00 | 15 | 26 | 29 |
+| San Bernardino | 46,057 | 535,000 | 0.9920 | 1.0000 | 332.03 | 25 | 32 | 32 |
+
+### Results (run on 2026-10-31)
+
+| | Sold | Listings |
+|---|---:|---:|
+| Rows in → out | 495,070 → 495,070 | 665,579 → 665,579 |
+| Columns in → out | 103 → 128 | 92 → 117 |
+| Closed records | 495,070 | 195,558 |
+| `price_ratio` filled | 494,166 | 194,604 |
+| `close_to_original_list_ratio` filled (identical to `price_ratio`) | 494,166 | 194,604 |
+| `close_to_current_list_ratio` filled (extra) | 495,067 | 195,558 |
+| Rows where the two list ratios both have values but differ (ListPrice ≠ OriginalListPrice) | 154,415 | 43,575 |
+| `price_per_sqft` filled | 494,616 | 195,382 |
+| `Year` / `Month` / `YrMo` filled | 495,070 | 195,558 |
+| `listing_to_contract_days` filled | 494,557 | 332,792 |
+| `contract_to_close_days` filled | 494,631 | 195,279 |
+| DaysOnMarket valid on Closed records (zeros included) | 495,014 (19,995 zeros) | 195,535 (13,831 zeros) |
+
+- **New columns:** each dataset gets 25:
+  - 9 metrics: the three ratios, `price_per_sqft`, `Year`, `Month`, `YrMo` and
+    the two day counts;
+  - 7 null-reason columns;
+  - 9 district columns.
+- **Main null reasons, sold:**
+  - `price_ratio` and `close_to_original_list_ratio`: OriginalListPrice
+    missing (899) or 0 (2), plus 3 without a valid ClosePrice.
+  - `close_to_current_list_ratio`: only the 3 without a valid ClosePrice.
+  - `price_per_sqft`: LivingArea missing (274) or set to null in cleaning (177).
+  - `listing_to_contract_days`: `negative_timeline_flag` (315) or
+    PurchaseContractDate missing (197).
+  - `contract_to_close_days`: `purchase_after_close_flag` (242) or
+    PurchaseContractDate missing (197).
+- **Main null reasons, listings:** 470,021 records aren't Closed. For
+  `listing_to_contract_days`, PurchaseContractDate is missing in 332,462 rows.
+- **Validated in the script:**
+  - `price_ratio` and `close_to_original_list_ratio` are identical in every row
+    of both datasets: values, nulls and null reasons.
+  - **`YrMo` against `year_month`, each on its own date basis:**
+    - In both datasets, `year_month` equals the month of the date it was built
+      from (CloseDate for sold, ListingContractDate for listings), with 0
+      mismatches.
+    - `YrMo` equals the CloseDate month on every Closed record.
+    - Sold: `YrMo` equals `year_month` in all 495,070 rows, since both come
+      from CloseDate.
+    - Listings: they agree in 20,448 of 195,558 Closed records. The rest closed
+      in a different month from their listing month, which is expected, not an
+      error.
+  - After saving and reloading, all input columns are text-identical to the
+    input. This covers identifiers with leading zeros, `year_month`,
+    `rate_30yr_fixed`, coordinates, audit values and flags.
+  - The new columns reload to exactly the values computed.
+- **Validated independently** (separate code that doesn't import the script):
+  - the schema: input columns first, then the 25 new columns;
+  - every input column is text-identical to the cleaned file;
+  - every metric is recomputed from the cleaned text, with its pattern of
+    nulls;
+  - the two required ratios are identical, and the extra ratio uses ListPrice;
+  - every null has a reason, and there are no infinite values;
+  - the `year_month` and `YrMo` checks above;
+  - in all six summary files, the `price_ratio_*` and
+    `close_to_original_list_ratio_*` statistics are identical;
+  - the sold county summary matches a recomputation exactly;
+  - the sample has 8 fully filled rows per dataset.
+- **Ratios and price per square foot are not outlier-filtered.** The extremes
+  are large:
+  - `price_ratio` reaches 9,118,000, where OriginalListPrice is $1;
+  - `close_to_current_list_ratio` reaches 200,200, where ListPrice is $1;
+  - `price_per_sqft` reaches 1,164,067, where ClosePrice is $835,800,000 on a
+    $835,800 list price.
+
+  Outlier handling is Week 7.
+
+### Outputs (in `output/week6/`, git-ignored, not committed)
+
+| File | Contents |
+|---|---|
+| `sold_engineered.csv`, `listings_engineered.csv` | Every input column unchanged, followed by the 25 new columns |
+| `sample_engineered.csv` | Rows with every new column filled (8 per dataset), plus one example of each common null reason |
+| `summary_by_<segment>.csv` | The six segmented summaries above |
+| `validation_report.md` | Requirements, formulas, coverage, null reasons, distributions, exclusions, district coverage, checks and limitations |
+| `validation_summary.csv` | Every count in the report, one per row |
+| `school_districts/` | The boundary GeoJSON and `source.json` |
+
+### Reloading the engineered files
+
+Use the Weeks 4–5 snippet (see *Reloading the cleaned files*), with these
+additions:
+
+```python
+TEXT += ["YrMo", "elementary_district_cds", "high_district_cds", "unified_district_cds"]
+WHOLE += ["Year", "Month", "listing_to_contract_days", "contract_to_close_days",
+          "school_district_match_count"]
+sold = pd.read_csv("output/week6/sold_engineered.csv", ...)  # same arguments as before
+```
+
+Without `"string"`, the CDS codes would lose their leading zeros. The ratio
+columns load as `float64`. Keep `float_precision="round_trip"` to read them
+exactly.
+
+### Limitations and open questions
+
+- **The ratio columns overlap by design:** `price_ratio` duplicates
+  `close_to_original_list_ratio`, because the handbook gives both the same
+  formula. `close_to_current_list_ratio` is the extra metric that differs.
+- **Outliers are not removed:** Week 7 will handle them. The summaries report
+  medians and quartiles, which extreme values affect less.
+- **Boundaries are from one year:** the 2024-25 boundaries are used for sales
+  from 2024 to 2026. Boundary changes in other years are not reflected.
+- **The MLS coordinate system is assumed:** the matching treats MLS
+  `Latitude`/`Longitude` as WGS 84, but their source CRS is undocumented and
+  unverified. Only the boundary file's CRS is documented (see *School
+  districts*).
+- **Points on a boundary** may match both neighbours (they would be reported
+  as ambiguous; none were in this run) or neither.
+- **Unmatched within the California bounding box; cause not verified:** 139
+  sold and 190 listing rows. They are not snapped to the nearest district.
+- **Repeated ListingKeys** are kept in the summaries, and why they repeat is
+  still unverified.
+- **CloseDate on listings that aren't Closed** has an unverified meaning, so
+  those listings have no completed-sale metrics.
