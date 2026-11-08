@@ -10,4 +10,11 @@ backup/
 # Local credentials - never commit
 .env
 
+# Tableau workbooks and extracts embed MLS data (packaged workbooks and extracts hold the rows;
+# plain .twb files can hold dimension values such as aliases) - never commit
+*.twbx
+*.twb
+*.hyper
+*.tde
+
 __pycache__/

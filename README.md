@@ -25,6 +25,11 @@ saved as new CSVs, ready for analysis over time.
 | `test_week4_5_cleaning.py` | Regression tests for `week4_5_cleaning.py` on a small synthetic file (no real data needed). |
 | `week6_feature_engineering.py` | **Week 6 deliverable.** Adds the market metrics and school districts to both cleaned datasets, and saves segmented summaries, a sample and a validation report. |
 | `test_week6_feature_engineering.py` | Regression tests for `week6_feature_engineering.py` on synthetic data and synthetic district polygons. |
+| `week7_outlier_detection.py` | **Week 7 deliverable.** Flags business-rule failures and IQR outliers in ClosePrice, LivingArea and DaysOnMarket, and saves full flagged and Closed-only filtered datasets, thresholds, a before/after summary and a validation report. |
+| `test_week7_outlier_detection.py` | Regression tests for `week7_outlier_detection.py` on synthetic data. |
+| `weeks8_10_tableau_prep.py` | **Weeks 8–10 preparation.** Builds the Tableau sales and listings data sources, reference calculations, a ZIP geography check and a validation report. |
+| `test_weeks8_10_tableau_prep.py` | Regression tests for `weeks8_10_tableau_prep.py` on synthetic data. |
+| `weeks8_10_tableau_build_guide.md` | Step-by-step guide to building `market_analysis.twbx` and `competitive_analysis.twbx` in Tableau. |
 | `download_missing_months.py` | Downloads any month that is missing or damaged, checks it, and saves it to `csv/`. |
 | `crmls_listed.py` | Original single-month script for listings (filtered by `ListingContractDate`). |
 | `crmls_sold.py` | Original single-month script for closed sales (filtered by `CloseDate` and `MlsStatus = 'Closed'`). |
@@ -38,7 +43,10 @@ following local folders:
 csv/            raw monthly files (CRMLSListingYYYYMM.csv, CRMLSSoldYYYYMM.csv)
 output/         combined datasets and run_report.txt (Week 1); week2_3/ and mortgage_rates/
                 (Weeks 2–3); cleaned/ (Weeks 4–5); week6/ (Week 6, including the downloaded
-                school district boundaries)
+                school district boundaries); week7/ (Week 7); weeks8_10/ (Tableau data,
+                references and workbooks)
+*.twbx *.twb    Tableau workbooks and extracts (they embed MLS data)
+*.hyper *.tde
 backup/         copies of raw files that were replaced
 downloads_tmp/  in-progress downloads and the download log
 .env            API key (local only)
@@ -140,8 +148,12 @@ python week2_3_eda.py                                 # Weeks 2-3 validation and
 python week2_3_mortgage_rates.py                      # add the FRED mortgage rate (needs internet)
 python week4_5_cleaning.py                            # Weeks 4-5 cleaning and quality flags
 python week6_feature_engineering.py                   # Week 6 metrics, school districts, summaries
+python week7_outlier_detection.py                     # Week 7 IQR outlier flags and filtered datasets
+python weeks8_10_tableau_prep.py                      # Weeks 8-10 Tableau data sources and references
 python test_week4_5_cleaning.py                       # tests (synthetic data, no real files needed)
 python test_week6_feature_engineering.py
+python test_week7_outlier_detection.py
+python test_weeks8_10_tableau_prep.py
 ```
 
 ---
@@ -1049,3 +1061,493 @@ exactly.
   still unverified.
 - **CloseDate on listings that aren't Closed** has an unverified meaning, so
   those listings have no completed-sale metrics.
+
+---
+
+## Week 7 – Outlier Detection and Data Quality
+
+**Goal:**
+- flag statistically unusual ClosePrice, LivingArea and DaysOnMarket values with
+  the IQR method, keeping business-rule failures separate;
+- save a full flagged dataset and a filtered analysis dataset for sold and for
+  listings.
+
+No record is deleted from the flagged files, and no input value is changed.
+
+**Deliverable:** [`week7_outlier_detection.py`](week7_outlier_detection.py)
+
+**Requires:**
+- `pandas` and `numpy`
+- `week1_aggregate.py`, `week4_5_cleaning.py` and
+  `week6_feature_engineering.py`, whose helpers it reuses
+- the Week 6 outputs (run `week6_feature_engineering.py` first)
+
+No internet is needed. The script stops with an error if an input is missing;
+it never reruns earlier stages.
+
+**Inputs (read only; their SHA-256 hashes are checked before and after the run,
+and were unchanged):**
+- `output/week6/sold_engineered.csv` (495,070 rows × 128 columns)
+- `output/week6/listings_engineered.csv` (665,579 rows × 117 columns)
+
+A raw line count of these files is 1–2 higher than the row count, because one
+office name in each file contains a line break inside quotes. pandas reads
+them correctly.
+
+**Run:** `python week7_outlier_detection.py` (about 3 minutes)
+
+**Tests:** `python test_week7_outlier_detection.py` runs 13 tests on small
+synthetic datasets. They cover:
+- the threshold calculation, checked against hand-computed quartiles and numpy;
+- inclusive bounds;
+- missing values, values that are invalid now or were set to null in cleaning,
+  and unparseable values;
+- zero DaysOnMarket;
+- records that aren't Closed;
+- exact duplicates versus repeated ListingKeys;
+- overlapping exclusion reasons and the medians before and after the IQR step;
+- supplementary metrics never excluding a row;
+- IQR = 0, and fields with no eligible values;
+- that the flagged file preserves the input and the filtered file is exactly
+  the included rows;
+- that no pandas warnings are raised.
+
+The tests were also run against five deliberately broken versions of the
+script, and each one was caught:
+- exclusive bounds;
+- duplicates used for the thresholds;
+- values set to null in cleaning treated as missing;
+- records that aren't Closed evaluated;
+- IQR = 0 silently skipped.
+
+### Requirements: verified versus chosen
+
+**Verified** against the Week 7 section of the intern handbook:
+- apply the IQR method to ClosePrice, LivingArea and DaysOnMarket, using
+  lower = Q1 − 1.5 × IQR and upper = Q3 + 1.5 × IQR;
+- add outlier flag columns rather than deleting records;
+- apply business rules (e.g. ClosePrice <= 0 is always invalid);
+- use percentiles alongside IQR;
+- save both a full flagged dataset and a clean filtered dataset;
+- write a comparison of dataset size and median values before and after
+  filtering.
+
+**My choices** (the handbook doesn't specify these):
+- thresholds per dataset, estimated on Closed records that aren't exact later
+  duplicates;
+- quartiles with pandas' default linear interpolation, the method in the
+  handbook's example code;
+- bounds are inclusive;
+- the filtered datasets are Closed-only;
+- how IQR = 0 and empty populations are handled;
+- the column names.
+
+### Filtering policy
+
+| Step | Rule |
+|---|---|
+| Business rules (first, separate from IQR) | ClosePrice <= 0 is invalid for Closed records. LivingArea <= 0 and DaysOnMarket < 0 are invalid for every record; 0 days is valid. A value the cleaning set to null for breaking a rule (original kept in `<field>_invalid_original`) counts as **business invalid**, not missing. |
+| Threshold population | Per dataset and per field: Closed records that are not exact later duplicates (`duplicate_record_flag`) and have a non-null, finite, valid value for that field |
+| Bounds | Q1 and Q3 by linear interpolation; lower = Q1 − 1.5 × IQR, upper = Q3 + 1.5 × IQR; a value equal to a bound is within it |
+| Evaluation | Only Closed records. Others keep status `not Closed`: a missing sale price is expected there, and their DaysOnMarket is days so far, not time to sell |
+| Filtered analysis dataset | **Closed only.** Not an exact later duplicate, all three fields valid, and within all three bounds. Repeated ListingKeys that aren't exact duplicates are kept |
+| IQR = 0 | The formula is applied as written (both bounds equal Q1 = Q3) and the field is reported in `threshold_status`. None occurred in this run |
+| No eligible values | No thresholds are computed or invented; values get status `no thresholds`, and no record can pass that field. None occurred in this run |
+
+- **Pooled thresholds:** the dataset-wide thresholds are the baseline. Pooling
+  every county and property type into one distribution flags expensive markets
+  and large or unusual homes. In San Mateo, 30% of sales are above the sold
+  upper bound for ClosePrice; in Santa Clara, 24%. So an IQR outlier is an
+  *unusual* value, not a proven data error.
+- **Diagnostics only:** price per square foot and the close-to-list ratios are
+  reported, but they never exclude a row.
+
+### Flag columns (17 per dataset, appended after the input columns)
+
+| Column | Meaning |
+|---|---|
+| `<field>_business_invalid_flag` | The value breaks the business rule now, or was set to null in cleaning for breaking it |
+| `<field>_iqr_status` | `within bounds`, `below lower bound` or `above upper bound`; or why the value wasn't compared: `not Closed`, `missing`, `business invalid`, `unparseable` or `no thresholds` |
+| `<field>_iqr_evaluable` | True only when the value was actually compared with the bounds |
+| `<field>_iqr_outlier_flag` | True when an evaluated value is outside the bounds. It is also False for unevaluated values, so read it with `_iqr_evaluable` or `_iqr_status` |
+| `iqr_outlier_flag`, `iqr_outlier_fields`, `iqr_fields_evaluated` | Any field an outlier; which fields; how many of the three were evaluated (0–3) |
+| `analysis_include` | True for exactly the rows in the filtered file |
+| `analysis_exclusion_reasons` | Every applicable reason, separated by `; ` (blank when included). Records that aren't Closed get only `not Closed` |
+
+`<field>` is `ClosePrice`, `LivingArea` or `DaysOnMarket`. A blank or
+ineligible value never shows `within bounds`, so it can't look as if it passed.
+
+### Results (run on 2026-11-07)
+
+**Thresholds** (the threshold population):
+
+| | Field | n | Q1 | Q3 | IQR | Lower | Upper | P1 | P5 | P50 | P95 | P99 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Sold | ClosePrice | 495,019 | 575,000 | 1,300,000 | 725,000 | −512,500 | 2,387,500 | 200,000 | 339,000 | 825,000 | 2,860,000 | 5,600,000 |
+| Sold | LivingArea | 494,571 | 1,250 | 2,227 | 977 | −215.5 | 3,692.5 | 610 | 841 | 1,648 | 3,569 | 5,300 |
+| Sold | DaysOnMarket | 494,966 | 8 | 49 | 41 | −53.5 | 110.5 | 0 | 1 | 19 | 132 | 235 |
+| Listings | ClosePrice | 195,558 | 599,000 | 1,350,000 | 751,000 | −527,500 | 2,476,500 | 215,000 | 350,000 | 850,000 | 2,900,000 | 5,550,000 |
+| Listings | LivingArea | 195,382 | 1,248 | 2,190 | 942 | −165 | 3,603 | 616 | 850 | 1,632 | 3,477 | 5,056 |
+| Listings | DaysOnMarket | 195,535 | 6 | 32 | 26 | −33 | 71 | 0 | 0 | 13 | 84 | 135 |
+
+**Flags among Closed records:**
+
+| | Field | Below lower | Above upper | Upper bound at | Business invalid | Missing |
+|---|---|---:|---:|---:|---:|---:|
+| Sold | ClosePrice | 0 | 37,060 | P92.5 | 1 | 2 |
+| Sold | LivingArea | 0 | 21,662 | P95.6 | 177 | 274 |
+| Sold | DaysOnMarket | 0 | 36,753 | P92.6 | 56 | 0 |
+| Listings | ClosePrice | 0 | 14,130 | P92.8 | 0 | 0 |
+| Listings | LivingArea | 0 | 8,455 | P95.7 | 77 | 99 |
+| Listings | DaysOnMarket | 0 | 14,256 | P92.7 | 23 | 0 |
+
+- **Duplicates:** the sold "above upper" counts include a few exact
+  duplicates (7, 5 and 5). Within the threshold population they are 37,053,
+  21,657 and 36,748.
+- **Records that aren't Closed** also carry the LivingArea and DaysOnMarket
+  rules: for all listings, 429 LivingArea and 34 DaysOnMarket values are
+  business invalid.
+- **Upper bound at:** the share of the threshold population at or below the
+  upper bound.
+
+**Population flow** (each step's removals are counted only at that step, so
+they don't overlap):
+
+| Stage | Sold | Listings |
+|---|---:|---:|
+| All input records (full flagged dataset) | 495,070 | 665,579 |
+| Closed | 495,070 | 195,558 |
+| Not an exact later duplicate | 495,022 | 195,558 |
+| All three fields valid (eligible; before IQR) | 494,512 | 195,359 |
+| Within all three IQR bounds (**filtered dataset**) | **417,886** | **165,236** |
+
+- **Removed at the IQR step:** 76,626 sold (15.5% of eligible) and 30,123
+  listings (15.4%).
+- **Share kept:** the sold filtered set is 84.4% of all sold rows. The listings
+  filtered set is 24.8% of all listings and 84.5% of Closed listings.
+
+**Exclusion reasons overlap.** Unique excluded rows are 77,184 for sold and
+500,343 for listings. Of these, 16,668 sold and 6,178 listing rows have two or
+more reasons. Among Closed records that aren't duplicates:
+
+| | Sold | Listings |
+|---|---:|---:|
+| Validity or missingness only | 272 | 105 |
+| IQR only | 76,626 | 30,123 |
+| Both | 238 | 94 |
+
+**Medians and means immediately before and after the IQR step** (eligible
+Closed records versus the filtered dataset):
+
+| | Field | Median before → after | Change | Mean before → after | Change |
+|---|---|---:|---:|---:|---:|
+| Sold | ClosePrice | 825,000 → 785,000 | −4.8% | 1,186,706 → 899,305 | −24.2% |
+| Sold | LivingArea | 1,648 → 1,574 | −4.5% | 1,903 → 1,681 | −11.7% |
+| Sold | DaysOnMarket | 19 → 16 | −15.8% | 37.6 → 26.7 | −29.1% |
+| Listings | ClosePrice | 850,000 → 815,000 | −4.1% | 1,193,943 → 933,100 | −21.8% |
+| Listings | LivingArea | 1,632 → 1,563 | −4.2% | 1,840 → 1,666 | −9.5% |
+| Listings | DaysOnMarket | 13 → 12 | −7.7% | 23.9 → 17.9 | −25.3% |
+
+### Discussion
+
+- **The filter is one-sided.** Every lower bound is negative, so the IQR step
+  removes only high values. That is why every median and mean falls.
+  - Medians move 4–5% for price and area. Means move 9–24%, because the means
+    were pulled up by the long upper tail.
+  - DaysOnMarket shifts most in relative terms (sold median 19 → 16 days).
+    In sold, 7.4% of the DaysOnMarket threshold population is above 110.5
+    days.
+- **Filtered statistics describe a narrower market.** They are not more
+  accurate, and they understate prices relative to all Closed sales. They
+  remove most luxury sales in the highest-priced counties, for example 30% of
+  San Mateo's. For county-level, luxury or large-home analysis, use the
+  flagged dataset with segment-appropriate thresholds rather than the pooled
+  filter.
+- **Implausibly low values pass.** Because the lower bounds are negative, the
+  filtered sold data still contains a ClosePrice of $1.15 and a LivingArea of
+  1 sq ft. It also has 3,670 sales below the population's P1 ($200,000), which
+  are not necessarily errors. Only the business rules (≤ 0) catch low values.
+- **Supplementary diagnostics** (reported, not used to exclude):
+  - price per square foot: its median moves 536 → 525 in sold, and its maximum
+    falls from 1,164,067 to 735,000;
+  - `close_to_current_list_ratio` still reaches 200,200 in the filtered data
+    (a $1 ListPrice), because ratio extremes aren't IQR outliers in any of the
+    three fields.
+
+### Outputs (in `output/week7/`, git-ignored, not committed)
+
+| File | Contents |
+|---|---|
+| `sold_flagged.csv`, `listings_flagged.csv` | Every input row and column unchanged, in the same order, followed by the 17 flag columns (sold 145 columns, listings 134) |
+| `sold_filtered.csv`, `listings_filtered.csv` | Exactly the flagged rows with `analysis_include = True`, with the same columns and order (417,886 and 165,236 rows) |
+| `iqr_thresholds.csv` | One row per dataset and field, with these column groups: population, Q1/Q3/IQR/bounds, `threshold_status`, P1/P5/P50/P95/P99, min/max, counts below and above, the bounds' percentile ranks, and Closed missing/invalid/unparseable counts |
+| `before_after_summary.csv` | Long format with a `section` column: `population flow`, `dataset size`, `median by stage`, `IQR step: eligible vs filtered`, `supplementary diagnostic (not an exclusion criterion)`, `exclusion reasons (overlapping)` and `unique excluded` |
+| `validation_report.md` | Policy, flag semantics, thresholds, counts, population flow, exclusion reasons, median comparison, percentiles, pooled-threshold evidence by county, the written comparison, checks and limitations |
+
+To reload a flagged or filtered file, use the Week 6 snippet (see *Reloading
+the engineered files*). Add `"Int64"` for `iqr_fields_evaluated`; the
+`*_flag`, `*_evaluable` and `analysis_include` columns load as `bool`.
+
+### Validation
+
+- **In the script, before saving:**
+  - quartiles match numpy's linear method;
+  - every included row is checked against the rules from its values: Closed,
+    not a duplicate, valid finite values, within all bounds;
+  - no record that isn't Closed is evaluated;
+  - no outlier flag is set on a value that wasn't evaluated;
+  - exclusion reasons are blank exactly for included rows.
+- **After saving:**
+  - the flagged files reload with the same rows, order and input text;
+  - the new columns reload to the same values;
+  - the filtered files are exactly the included flagged rows.
+- **Independently** (separate code that doesn't import the script):
+  - every input column of the flagged files is identical to the Week 6 text;
+  - the filtered files are exactly the `analysis_include = True` subset;
+  - thresholds, percentiles and counts, recomputed from the Week 6 text with
+    numpy, match `iqr_thresholds.csv`;
+  - the flags and `analysis_include` match a recomputation;
+  - the population flow, medians, means and exclusion counts match
+    `before_after_summary.csv`;
+  - the report shows the same medians.
+
+### Limitations
+
+- **IQR flags unusual values, not errors.** Valid market extremes (luxury
+  homes, very large properties, slow sales) are flagged too, and filtering
+  doesn't by itself make the data more accurate.
+- **One set of thresholds per dataset:** they are pooled across counties and
+  property types, which over-flags high-priced markets. Segment-specific
+  thresholds would be a separate, documented choice.
+- **Low values aren't screened by IQR here:** the lower bounds are negative.
+- **Sold and listings overlap:** listings' Closed records overlap with sold, so
+  the two sets of thresholds are close but not identical.
+- **Repeated ListingKeys** that aren't exact duplicates are kept; why they
+  repeat is still unverified.
+
+---
+
+## Weeks 8–10 – Tableau Dashboard Development
+
+**Goal:** the handbook's two workbooks.
+- `market_analysis.twbx`: five required monthly dashboards plus one of my own
+  design, filterable by city, county, ZIP code and PropertySubType.
+- `competitive_analysis.twbx`: Top 100 agents and offices, two ZIP heat maps,
+  plus one of my own design.
+
+**Status:**
+- **Done here (and validated):** the data preparation, the reference numbers
+  and the build guide.
+- **Still manual:** building the workbooks in Tableau, following
+  [`weeks8_10_tableau_build_guide.md`](weeks8_10_tableau_build_guide.md). They
+  are not built yet.
+
+**Deliverable (preparation):**
+[`weeks8_10_tableau_prep.py`](weeks8_10_tableau_prep.py)
+
+**Requires:**
+- `pandas`, `numpy` and `requests`
+- the Week 7 outputs; it reuses Week 1, 4–5, 6 and 7 helpers
+
+It downloads the Census ZCTA list (about 1 MB) once. No MLS data is sent
+anywhere.
+
+**Run:** `python weeks8_10_tableau_prep.py` (about 2 minutes)
+
+**Tests:** `python test_weeks8_10_tableau_prep.py` runs 10 tests on synthetic
+sales and listings. They cover:
+- the counting grain and exact duplicates;
+- the metric-specific valid mode and the IQR mode;
+- new listings across all statuses, independent of the sales mode;
+- office normalization and placeholders;
+- agent keys and ranking ties;
+- ZIP derivation with leading zeros;
+- labels that match across the two sources;
+- no warnings.
+
+### Inputs (read only; SHA-256 unchanged after the run)
+
+- `output/week7/sold_flagged.csv` (495,070 × 145) and
+  `output/week7/listings_flagged.csv` (665,579 × 134). These are the Week 6
+  engineered data plus the Week 7 flags; the Week 6 files are unchanged too.
+- Every row is `Residential`. Sold rows are all `Closed`; listings are Active
+  323,323, Closed 195,558, Pending 97,029, ActiveUnderContract 47,364 and
+  ComingSoon 2,305.
+
+### Counting grain: evidence and policy
+
+| | Sales | Listings |
+|---|---:|---:|
+| Input rows | 495,070 | 665,579 |
+| Exact later duplicates dropped (`duplicate_record_flag`) | 48 | 0 |
+| Rows in the Tableau file | 495,022 | 665,579 |
+| Repeated-key rows (after removing duplicates) | 658 in 327 keys | 404 in 201 keys |
+| Counted rows (`transaction_row = 1`, one per ListingKey) | 494,691 | 665,376 |
+
+**Evidence:** after exact duplicates are removed, every repeated ListingKey has:
+- the same ListingId;
+- its rows in different monthly files.
+
+The sold rows also differ in CloseDate (1–440 days apart, median 25). The
+listing rows differ in ListingContractDate, often with a status change such as
+ComingSoon → Active or Active → Closed. They are snapshots of one listing whose
+dates moved between pulls.
+
+**Policy:**
+- A ListingKey counts once.
+- The counted row is the most recently updated snapshot: the latest
+  `ContractStatusChangeDate`, then the later date, then the later file row. The
+  other snapshots stay in the files with `transaction_row = 0`.
+
+**Unresolved:** in 86 sold keys the ClosePrice also differs. A price correction
+can't be told apart from a closing that fell through and closed again; these
+still count once.
+
+### The two Tableau sources
+
+**`tableau_sales.csv`** (sold; sale month = CloseDate)
+- **Original columns, text-identical to the input:** identifiers, geography
+  originals, prices, dates and the Week 7 flags.
+- **Filter labels:** `county_label`, `city_label`, `zip_code`, `state_label` and
+  `property_subtype_label`.
+- **Agent and office keys and labels.**
+- **Eligibility for each mode,** as 0/1 columns.
+
+**`tableau_listings.csv`** (all statuses; listing month = ListingContractDate)
+- the same filter labels, and `new_listing_event`.
+
+The two sources are never appended or joined. Filters pass between them only
+through blend links on the four label fields.
+
+**Labels** are conservative:
+- Values that differ only in case or spacing share the most frequent spelling.
+  This merges 1,249 → 1,244 city spellings; county, state and subtype have no
+  variants.
+- The same mapping is used in both files.
+- The originals are kept.
+
+**ZIP code:** the 5-digit text taken from `PostalCode`.
+
+| | Sales | Listings |
+|---|---:|---:|
+| 5-digit | 492,087 | 661,854 |
+| ZIP+4 trimmed | 2,567 | 3,422 |
+| Malformed suffix trimmed | 31 | 47 |
+| Not usable | 6 | 53 |
+
+These are counted rows. 434 counted sales and 716 counted listings have a ZIP
+that isn't in the Census ZCTA list, so Tableau may not map them; they are listed
+in `zip_geography_check.csv`.
+
+### Sales modes and metric definitions
+
+| Mode | Population | Default in |
+|---|---|---|
+| Week 7 IQR-filtered | Week 7 `analysis_include` (417,597 counted sales) | `market_analysis`, continuing the prior assignment |
+| Valid before IQR | Metric-specific validity (494,691 counted sales). Closed sales need only a CloseDate; volume and median price a valid ClosePrice (494,689); average DOM a valid DaysOnMarket (494,635; 0 is valid); the ratio a valid ratio (493,788). A missing LivingArea or DaysOnMarket never removes a sale from counts or volume | `competitive_analysis`: the IQR filter removes every sale above about $2.39M and would drop the high-end brokerages from the rankings |
+
+**Metric definitions** (copyable Tableau formulas are in the guide):
+- **Median close price:** median of the eligible ClosePrice.
+- **Average days on market:** mean of the eligible DaysOnMarket.
+- **Average close-to-original-list ratio:** mean of the row-level
+  `close_to_original_list_ratio`, shown as a percentage. It is never computed
+  from price sums and never uses the current-list ratio.
+- **New listings:** sum of `new_listing_event` by `listing_month`. It never uses
+  the sales mode.
+- **Closed sales:** sum of the counted rows by `sale_month`.
+- **Sales volume:** sum of the eligible ClosePrice.
+
+### Agents and offices
+
+- **No listing-agent or listing-office ID exists in the data.**
+- **Offices** are keyed by name, normalized for case and spacing (19,142
+  offices with sales).
+- **Agents** are keyed by name + listing office (98,286), and shown as
+  "Name · Office".
+- **Why not email:**
+  - `ListAgentEmail` is missing for every listing from 2026-06 on;
+  - some team emails are shared by several agents;
+  - of the 3,487 name + office keys with more than one email, 3,053 used them
+    one after another, so email would split one person.
+- **Unresolved:** in 434 keys the emails overlap in time; these may be two
+  people with the same name in one office.
+- **Sensitivity:** the Top 100 by volume shares 93–94 names with rankings keyed
+  by email + name, by name only, or by email only.
+- **Unattributed, never ranked:** placeholder names ("Non-Member",
+  "PWNONMEMBER", "Unknown Office" and similar) and missing names. In the valid
+  mode, 117 counted sales have no identifiable listing agent and 9 have no
+  identifiable listing office. They stay in market totals.
+
+### Coverage
+
+- Both sources run from **2024-01 to 2026-09** (33 months). Months without data
+  are absent, never zero.
+- Some months come from dated API snapshots (2026-10-02/03): listings 2026-01
+  and 2026-05 to 2026-09; sales 2026-05 to 2026-09. The rest come from
+  FileZilla exports, so trends can step at the boundaries
+  (`month_coverage.csv`).
+- Recent months may still be revised by late reporting.
+
+### Outputs (in `output/weeks8_10/`, git-ignored)
+
+`tableau_sales.csv`, `tableau_listings.csv`, `reference_monthly.csv`,
+`reference_agents_top100.csv`, `reference_offices_top100.csv`,
+`reference_zip.csv`, `reference_segments.csv`, `zip_geography_check.csv`,
+`month_coverage.csv`, `validation_report.md` and
+`reference/2024_Gaz_zcta_national.zip`. Save the workbooks in
+`output/weeks8_10/workbooks/`; `*.twbx`, `*.twb`, `*.hyper` and `*.tde` are also
+git-ignored everywhere.
+
+### Validation
+
+- **In the script:**
+  - one counted row per ListingKey;
+  - the IQR mode never counts a row the valid mode doesn't;
+  - the saved files reload with identical identifier, geography, price, date
+    and flag text;
+  - `zip_code` is always 5 digits;
+  - 0/1 columns hold only 0 or 1;
+  - `zcta_latitude` and `zcta_longitude` are plain numbers, blank only where a
+    ZIP has no Census point. The Census file pads its longitude column, and
+    that padding is trimmed (fixed 2026-11-07; 0 values failed conversion);
+  - no cell contains a line break;
+  - monthly totals add up.
+- **Independently** (separate code from the Week 7 files):
+  - the counting grain;
+  - monthly closed sales, volume, median price, average DOM and average ratio
+    in both modes;
+  - totals taken from the Tableau files the way the guide's formulas compute
+    them;
+  - monthly new listings;
+  - the agent and office Top 100s (sizes, ranks, totals);
+  - ZIP homes sold and medians;
+  - the Los Angeles County segment;
+  - the input hashes.
+
+  All of them match.
+
+### Limitations and open questions
+
+- **The average close-to-original-list ratio is dominated by a few records**
+  with a tiny OriginalListPrice (e.g. $1), in both modes. For example, the
+  February 2025 valid-mode average is 877 (87,700%) against a median of 1.00. No
+  ratio cutoff is applied, because none is documented. The guide shows the
+  median next to the average. **A supervisor decision is needed.**
+- **Valid-mode volume rankings are driven by a few implausible ClosePrices:**
+  - the #1 agent has $810M of $1.44B in one sale;
+  - the #4 and #5 agents have 98–99.9% of their volume in one sale
+    ($970M–$989.5M).
+
+  The largest-sale columns and tooltips expose this; units and the IQR mode
+  aren't affected. No price cutoff is invented.
+- **Volume credit:** listing-side only, with no split for co-listing offices
+  (`CoListOfficeName` is present for about 24% of sales).
+- **Names, not IDs:** office branches of one brand share a name, and agent
+  identity is name-based.
+- **Repeated keys:** 86 sold keys whose ClosePrice differs are counted once,
+  which may be wrong.
+- **Mapping:** Tableau's own geocoding decides what maps; the ZCTA list only
+  predicts it.
+- **Publishing:** Weeks 11–12 ask for Tableau Public, but the MLS data is
+  confidential. How to publish (for example aggregated data only) must be agreed
+  before anything is uploaded.
